@@ -15,20 +15,37 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # 1. 데이터 수집 함수 모음 (API 호출)
 # ======================================================
 
-def get_binance_chart_data():
-    """바이낸스 API를 통해 일봉/주봉 RSI 및 200주 이평선 계산"""
+def get_btc_price_and_chart():
+    """
+    CoinGecko 및 바이낸스/업비트를 활용한 비트코인 가격 및 차트 수집 (이중화 적용)
+    """
+    current_price = 0
+    daily_rsi = 50.0
+    weekly_rsi = 50.0
+    below_200wma = False
+    funding_rate = 0.0001
+
+    # 1. 실시간 BTC 가격 수집 (CoinGecko API - 지역 차단 없음)
     try:
-        exchange = ccxt.binance()
-        
-        # 일봉 수집 (RSI 계산용)
+        cg_url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+        res = requests.get(cg_url, timeout=5).json()
+        current_price = float(res['bitcoin']['usd'])
+    except Exception as e:
+        print(f"CoinGecko 가격 수집 실패: {e}")
+
+    # 2. 바이낸스/업비트 기반 차트 데이터(RSI, 200WMA, 펀딩비) 수집
+    try:
+        exchange = ccxt.binance({'enableRateLimit': True})
         ohlcv_daily = exchange.fetch_ohlcv('BTC/USDT', timeframe='1d', limit=100)
         df_daily = pd.DataFrame(ohlcv_daily, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # 주봉 수집 (200주 이평선 및 주봉 RSI 계산용)
         ohlcv_weekly = exchange.fetch_ohlcv('BTC/USDT', timeframe='1w', limit=210)
         df_weekly = pd.DataFrame(ohlcv_weekly, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
-        # RSI 계산 함수
+        # 만약 CoinGecko에서 가격을 못 가져왔다면 차트 데이터의 종가 활용
+        if current_price == 0:
+            current_price = df_daily['close'].iloc[-1]
+
         def calculate_rsi(data, window=14):
             delta = data['close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -36,31 +53,36 @@ def get_binance_chart_data():
             rs = gain / loss
             return 100 - (100 / (1 + rs))
 
-        daily_rsi = calculate_rsi(df_daily).iloc[-1]
-        weekly_rsi = calculate_rsi(df_weekly).iloc[-1]
+        daily_rsi = round(calculate_rsi(df_daily).iloc[-1], 2)
+        weekly_rsi = round(calculate_rsi(df_weekly).iloc[-1], 2)
         
-        current_price = df_daily['close'].iloc[-1]
         wma_200 = df_weekly['close'].rolling(200).mean().iloc[-1]
         below_200wma = current_price < wma_200 if not pd.isna(wma_200) else False
 
-        # 펀딩비 수집 (바이낸스 선물)
-        funding_rate = 0.0001
         try:
             funding_info = exchange.fapiPublicGetPremiumIndex({'symbol': 'BTCUSDT'})
             funding_rate = float(funding_info.get('lastFundingRate', 0.0001))
         except Exception:
             pass
 
-        return {
-            'current_price': current_price,
-            'daily_rsi': round(daily_rsi, 2),
-            'weekly_rsi': round(weekly_rsi, 2),
-            'below_200wma': below_200wma,
-            'funding_rate': funding_rate
-        }
     except Exception as e:
-        print(f"차트 데이터 수집 오류: {e}")
-        return {'current_price': 0, 'daily_rsi': 50, 'weekly_rsi': 50, 'below_200wma': False, 'funding_rate': 0.0001}
+        print(f"CCXT 바이낸스 수집 실패 (백업 업비트/기본값 사용): {e}")
+        # 바이낸스 접근 불가 시 업비트 원화 가격을 달러 환율로 변환하는 백업 로직
+        if current_price == 0:
+            try:
+                upbit_res = requests.get("https://api.upbit.com/v1/ticker?markets=KRW-BTC", timeout=5).json()
+                krw_price = upbit_res[0]['trade_price']
+                current_price = round(krw_price / 1350, 2)  # 추정 환율 적용
+            except Exception:
+                current_price = 0
+
+    return {
+        'current_price': current_price,
+        'daily_rsi': daily_rsi,
+        'weekly_rsi': weekly_rsi,
+        'below_200wma': below_200wma,
+        'funding_rate': funding_rate
+    }
 
 def get_fear_and_greed_index():
     """Alternative.me API에서 공포·탐욕 지수 수집"""
@@ -75,7 +97,7 @@ def get_fear_and_greed_index():
         return 50, "Neutral"
 
 def get_onchain_and_macro_data():
-    """온체인 및 거시지표 수집 (추후 유료 API 교체 가능)"""
+    """온체인 및 거시지표 데이터"""
     return {
         'mvrv_z': -0.1,
         'sopr': 0.97,
@@ -184,15 +206,17 @@ async def main():
         raise ValueError("텔레그램 토큰 또는 Chat ID 환경변수가 설정되지 않았습니다.")
 
     print("데이터 수집 시작...")
-    chart = get_binance_chart_data()
+    chart = get_btc_price_and_chart()
     fng = get_fear_and_greed_index()
     onchain = get_onchain_and_macro_data()
 
     dca_score, guide, reasons = calculate_enriched_dca_score(chart, fng, onchain)
 
+    price_str = f"${chart['current_price']:,.2f}" if chart['current_price'] > 0 else "수집 실패"
+
     message = f"""📊 [비트코인 종합 DCA 분할 매수 진단]
 
-💵 현재 BTC 가격: ${chart['current_price']:,}
+💵 현재 BTC 가격: {price_str}
 🎯 분할 매수 점수: {dca_score} / 100점
 💡 실행 가이드: {guide}
 
@@ -203,7 +227,6 @@ async def main():
 
     print("텔레그램 메시지 전송 중...")
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    # parse_mode를 제거하여 특수문자 파싱 오류 원천 차단
     await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
     print("전송 완료!")
 
