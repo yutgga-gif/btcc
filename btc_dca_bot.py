@@ -1,16 +1,17 @@
+import os
 import asyncio
 import requests
 import pandas as pd
 import ccxt
 from telegram import Bot
 
-# ================= ====================================
-# [설정] 텔레그램 봇 토큰 및 채널/개인 CHAT ID 입력
 # ======================================================
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
-TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID_HERE"
+# [설정] GitHub Secrets 환경변수에서 토큰 및 ID 자동 수신
+# ======================================================
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ================= ====================================
+# ======================================================
 # 1. 데이터 수집 함수 모음 (API 호출)
 # ======================================================
 
@@ -74,27 +75,23 @@ def get_fear_and_greed_index():
         return 50, "Neutral"
 
 def get_onchain_and_macro_data():
-    """
-    무료 API 한계로 인해 유료 온체인/거시 지표(Glassnode, CryptoQuant 등)는 
-    기본값/시뮬레이션으로 구성하며 API 키가 있을 경우 교체 가능하도록 설계
-    """
-    # Glassnode / CryptoQuant / Farside ETF API 연동 지점
+    """온체인 및 거시지표 수집 (추후 유료 API 교체 가능)"""
     return {
-        'mvrv_z': -0.1,                # MVRV-Z Score (-0.5~3.5)
-        'sopr': 0.97,                  # SOPR 지수
-        'nupl': -0.05,                 # NUPL 지수
-        'puell_multiple': 0.45,        # Puell Multiple (채굴자 지표)
-        'oi_washed': True,             # 미결제약정 청산 여부
-        'long_liquidated': True,       # 롱 대량 청산 완료 여부
-        'etf_flow_turned_positive': True, # ETF 순유입 전환 여부
-        'dxy_falling': True,           # 달러인덱스 약세 여부
-        'macro_pivot': False,          # 거시 유동성 완화 기조
-        'exchange_outflow_large': True,# 거래소 대량 출금
-        'whale_wallets_increasing': True, # 고래 지갑 수 증가
-        'sth_sopr_panic': True         # 단기홀더 패닉셀 여부
+        'mvrv_z': -0.1,
+        'sopr': 0.97,
+        'nupl': -0.05,
+        'puell_multiple': 0.45,
+        'oi_washed': True,
+        'long_liquidated': True,
+        'etf_flow_turned_positive': True,
+        'dxy_falling': True,
+        'macro_pivot': False,
+        'exchange_outflow_large': True,
+        'whale_wallets_increasing': True,
+        'sth_sopr_panic': True
     }
 
-# ================= ====================================
+# ======================================================
 # 2. 6대 카테고리 종합 점수 산정 알고리즘
 # ======================================================
 
@@ -102,7 +99,7 @@ def calculate_enriched_dca_score(chart, fng, onchain):
     dca_score = 0
     reasons = []
 
-    # [1] 고급 온체인 (최대 25점)
+    # [1] 고급 온체인
     if onchain.get('mvrv_z', 0) < 0:
         dca_score += 10
         reasons.append("📊 MVRV-Z Score 음수 진입 (역사적 대바닥 저평가 구간)")
@@ -113,7 +110,7 @@ def calculate_enriched_dca_score(chart, fng, onchain):
         dca_score += 7
         reasons.append("😱 NUPL 음수 전환 (Capitulation/투항 단계 진입)")
 
-    # [2] 차트 & 이평선 (최대 20점)
+    # [2] 차트 & 이평선
     if chart['weekly_rsi'] < 35:
         dca_score += 8
         reasons.append(f"📈 주봉 RSI ({chart['weekly_rsi']}) 35 미만 (중장기 과매도)")
@@ -124,7 +121,7 @@ def calculate_enriched_dca_score(chart, fng, onchain):
         dca_score += 6
         reasons.append("🧱 주봉 200이평선(200WMA) 이하 타점 (장기 모아가는 구간)")
 
-    # [3] 파생상품 & 청산 (최대 15점)
+    # [3] 파생상품 & 청산
     if chart['funding_rate'] < 0:
         dca_score += 6
         reasons.append(f"🔥 펀딩비 음수 ({chart['funding_rate']:.4f}%) (숏 과열 및 숏스퀴즈 가능성)")
@@ -135,7 +132,7 @@ def calculate_enriched_dca_score(chart, fng, onchain):
         dca_score += 4
         reasons.append("💥 롱 포지션 대량 강제 청산 완료 (매도 압력 소진)")
 
-    # [4] 기관 & 거시경제 (최대 15점)
+    # [4] 기관 & 거시경제
     if onchain.get('etf_flow_turned_positive', False):
         dca_score += 7
         reasons.append("🏦 미국 비트코인 현물 ETF 순유입 전환 (기관 자금 재유입)")
@@ -146,7 +143,7 @@ def calculate_enriched_dca_score(chart, fng, onchain):
         dca_score += 4
         reasons.append("🌐 거시 유동성 완화 기조 (금리 인하 / CPI 안정세)")
 
-    # [5] 고래 & 채굴자 (최대 15점)
+    # [5] 고래 & 채굴자
     if onchain.get('puell_multiple', 1.0) < 0.5:
         dca_score += 6
         reasons.append("⛏️ Puell Multiple < 0.5 (채굴자 항복/채굴 원가 이하 바닥)")
@@ -157,7 +154,7 @@ def calculate_enriched_dca_score(chart, fng, onchain):
         dca_score += 4
         reasons.append("🐳 1,000 BTC 이상 고래 지갑 수 증가세 (고래 매집 중)")
 
-    # [6] 심리 & 수급 (최대 10점)
+    # [6] 심리 & 수급
     fng_val, fng_class = fng
     if fng_val < 25:
         dca_score += 6
@@ -178,11 +175,14 @@ def calculate_enriched_dca_score(chart, fng, onchain):
 
     return dca_score, guide, reasons
 
-# ================= ====================================
+# ======================================================
 # 3. 텔레그램 전송 실행 메인 함수
 # ======================================================
 
 async def main():
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise ValueError("텔레그램 토큰 또는 Chat ID 환경변수가 설정되지 않았습니다.")
+
     print("데이터 수집 시작...")
     chart = get_binance_chart_data()
     fng = get_fear_and_greed_index()
@@ -190,7 +190,6 @@ async def main():
 
     dca_score, guide, reasons = calculate_enriched_dca_score(chart, fng, onchain)
 
-    # 텔레그램 메시지 포맷팅
     message = f"""📊 <b>[비트코인 종합 DCA 분할 매수 진단]</b>
 
 💵 <b>현재 BTC 가격:</b> ${chart['current_price']:,}
