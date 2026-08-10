@@ -105,7 +105,7 @@ def calculate_enriched_dca_score(chart, fng, onchain):
         reasons.append("📊 MVRV-Z Score 음수 진입 (역사적 대바닥 저평가 구간)")
     if onchain.get('sopr', 1.0) < 0.98:
         dca_score += 8
-        reasons.append("📉 SOPR < 0.98 (시장 참여자 손절 물량 속출 중)")
+        reasons.append("📉 SOPR 0.98 미만 (시장 참여자 손절 물량 속출 중)")
     if onchain.get('nupl', 0.5) < 0:
         dca_score += 7
         reasons.append("😱 NUPL 음수 전환 (Capitulation/투항 단계 진입)")
@@ -146,7 +146,7 @@ def calculate_enriched_dca_score(chart, fng, onchain):
     # [5] 고래 & 채굴자
     if onchain.get('puell_multiple', 1.0) < 0.5:
         dca_score += 6
-        reasons.append("⛏️ Puell Multiple < 0.5 (채굴자 항복/채굴 원가 이하 바닥)")
+        reasons.append("⛏️ Puell Multiple 0.5 미만 (채굴자 항복/채굴 원가 이하 바닥)")
     if onchain.get('exchange_outflow_large', False):
         dca_score += 5
         reasons.append("📦 거래소 비트코인 대량 순유출 (개인지갑 장기 매집 이체)")
@@ -190,20 +190,21 @@ async def main():
 
     dca_score, guide, reasons = calculate_enriched_dca_score(chart, fng, onchain)
 
-    message = f"""📊 <b>[비트코인 종합 DCA 분할 매수 진단]</b>
+    message = f"""📊 [비트코인 종합 DCA 분할 매수 진단]
 
-💵 <b>현재 BTC 가격:</b> ${chart['current_price']:,}
-🎯 <b>분할 매수 점수:</b> {dca_score} / 100점
-💡 <b>실행 가이드:</b> {guide}
+💵 현재 BTC 가격: ${chart['current_price']:,}
+🎯 분할 매수 점수: {dca_score} / 100점
+💡 실행 가이드: {guide}
 
-📌 <b>포착된 {len(reasons)}가지 핵심 가점 근거:</b>
+📌 포착된 {len(reasons)}가지 핵심 가점 근거:
 """
     for idx, reason in enumerate(reasons, 1):
         message += f"{idx}. {reason}\n"
 
     print("텔레그램 메시지 전송 중...")
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
+    # parse_mode를 제거하여 특수문자 파싱 오류 원천 차단
+    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
     print("전송 완료!")
 
 if __name__ == "__main__":
