@@ -2,8 +2,8 @@ name: Bitcoin DCA Telegram Bot
 
 on:
   schedule:
-    - cron: '0 0 * * *' # UTC 00:00 (한국 시간 오전 9시)
-  workflow_dispatch: # 수동 실행 버튼 활성화
+    - cron: '0 0 * * *' # 매일 한국 시간 오전 9시 실행
+  workflow_dispatch: # 수동 실행 활성화
 
 jobs:
   run-bot:
