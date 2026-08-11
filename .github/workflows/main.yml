@@ -2,8 +2,8 @@ name: Run DCA Bot
 
 on:
   schedule:
-    # 매일 한국 시간 오전 10시 (UTC 01:00) 자동 실행
-    - cron: '0 1 * * *'
+    # 매일 한국 시간 오전 10시 15분 (UTC 01:15) 자동 실행 (정각 지연 회피)
+    - cron: '15 1 * * *'
   workflow_dispatch: # 수동 실행 버튼 활성화
 
 jobs:
