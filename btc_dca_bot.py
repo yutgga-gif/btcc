@@ -24,28 +24,30 @@ def analyze_log_channel_system(symbol, asset_name, period):
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, interval="1d", timeout=15)
         
-        # 데이터 유효성 검증
         if df is None or df.empty:
-            print(f"[{symbol}] 데이터를 가져오지 못했습니다.")
+            print(f"[{symbol}] 데이터 수집 실패 (Empty Data)")
             return None
             
-        # 종가(Close) 기준 결측치 완전 제거
+        # 종가 데이터 정제
         df = df[['Close']].dropna()
         if len(df) < 500:
-            print(f"[{symbol}] 분석에 필요한 최소 데이터 개수 부족 (현재: {len(df)}개)")
+            print(f"[{symbol}] 데이터 개수 부족 (현재: {len(df)}개)")
             return None
 
     except Exception as e:
-        print(f"[{symbol}] 데이터 수집 중 예외 발생: {e}")
+        print(f"[{symbol}] yfinance API 연결 에러: {e}")
         return None
 
-    # 로그 변환 및 타임 인덱스 생성
+    # 날짜 기준 정확한 시계열 x축 생성 (365일/252일 거래일 차이 완벽 보정)
+    df.index = pd.to_datetime(df.index)
+    first_date = df.index[0]
+    df['Time_Days'] = (df.index - first_date).days.astype(float)
     df['Log_Close'] = np.log(df['Close'])
-    df['Time_Index'] = np.arange(len(df))
 
-    # 선형 회귀 연산 (기울기 및 절편)
-    x = df['Time_Index'].values
+    x = df['Time_Days'].values
     y = df['Log_Close'].values
+
+    # 선형 회귀 연산 (1차 기울기 및 절편)
     slope, intercept = np.polyfit(x, y, 1)
 
     # 잔차(Residuals) 기반 표준편차 연산
@@ -58,12 +60,13 @@ def analyze_log_channel_system(symbol, asset_name, period):
     center_band = np.exp(log_fitted)                   # 0σ  (적정 중앙)
     lower_band = np.exp(log_fitted - (2.0 * std_dev))  # -2σ (바닥 하단)
 
+    # 확정된 최신 데이터 추출
     cur_price = float(df['Close'].iloc[-1])
     cur_upper = float(upper_band[-1])
     cur_center = float(center_band[-1])
     cur_lower = float(lower_band[-1])
 
-    # 전고점 대비 하락률 (MDD)
+    # 역사적 전고점 대비 하락률 (MDD)
     ath_price = float(df['Close'].max())
     mdd_pct = round(((cur_price - ath_price) / ath_price) * 100, 2)
 
@@ -75,7 +78,7 @@ def analyze_log_channel_system(symbol, asset_name, period):
     channel_pos = round(((cur_log - min_log) / (max_log - min_log)) * 100, 1)
 
     # -----------------------------------------------------------
-    # 3단계 분할 매수 및 익절 가이드 세부 판정
+    # 3단계 분할 매수 및 익절 가이드 정밀 판정
     # -----------------------------------------------------------
     if channel_pos <= 0.0:
         cycle_state = "🚨 [3차 필살기 구간] 채널 최하단선 이탈 (-2σ 이하)"
@@ -148,16 +151,16 @@ def main():
             resp = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                 json={"chat_id": TELEGRAM_CHAT_ID, "text": report},
-                timeout=10
+                timeout=12
             )
             if resp.status_code == 200:
-                print("텔레그램 발송 성공!")
+                print("텔레그램 메시지 발송 성공!")
             else:
-                print(f"텔레그램 발송 응답 에러: {resp.status_code} - {resp.text}")
+                print(f"텔레그램 응답 에러: {resp.status_code} - {resp.text}")
         except Exception as e:
-            print(f"텔레그램 발송 예외 발생: {e}")
+            print(f"텔레그램 통신 예외 발생: {e}")
     else:
-        print("텔레그램 토큰 또는 Chat ID 설정이 비어있습니다. 콘솔 출력으로 대체합니다.")
+        print("텔레그램 설정값(Secrets) 누락. 콘솔에만 출력합니다.")
 
 if __name__ == "__main__":
     main()
