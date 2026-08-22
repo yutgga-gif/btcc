@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import yfinance as yf
+from hmmlearn.hmm import GaussianHMM
 
 # ==========================================
 # 1. 설정값 (GitHub Secrets 연동)
@@ -17,161 +18,119 @@ TARGET_ASSETS = {
 }
 
 # ==========================================
-# 2. FRED 거시경제 수집
+# 2. [축 2] HMM 기반 시장 국면(Regime) 연산 (버그 수정)
 # ==========================================
-def get_fred_macro_data():
-    macro_data = {'macro_score': 50, 'macro_status': "중립"}
+def analyze_hmm_regime(df_daily):
     try:
-        df_fed = pd.read_csv("https://fred.stlouisfed.org/graph/fredgraph.csv?id=FEDFUNDS", timeout=10).dropna()
-        fed_rate = float(pd.to_numeric(df_fed.iloc[-1]['FEDFUNDS'], errors='coerce'))
+        sub = df_daily.copy()
+        sub['Return'] = np.log(sub['Close'] / sub['Close'].shift(1))
+        sub['Volatility'] = sub['Return'].rolling(window=20).std()
+        sub = sub.dropna()
 
-        df_spread = pd.read_csv("https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y2Y", timeout=10).dropna()
-        yield_spread = float(pd.to_numeric(df_spread.iloc[-1]['T10Y2Y'], errors='coerce'))
+        if len(sub) < 500: return False, 0.0, "데이터 부족"
 
-        df_real = pd.read_csv("https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFII10", timeout=10).dropna()
-        real_yield = float(pd.to_numeric(df_real.iloc[-1]['DFII10'], errors='coerce'))
-
-        macro_score = 0
-        if fed_rate <= 3.0: macro_score += 35
-        elif fed_rate <= 4.5: macro_score += 20
+        X = sub[['Return', 'Volatility']].values
         
-        if yield_spread > 0.2: macro_score += 35
-        elif yield_spread > 0: macro_score += 20
-        
-        if real_yield < 1.5: macro_score += 30
-        elif real_yield < 2.0: macro_score += 15
+        # HMM 모델 학습 (3가지 국면)
+        model = GaussianHMM(n_components=3, covariance_type="diag", n_iter=1000, random_state=42)
+        model.fit(X)
 
-        if macro_score >= 80: macro_status = "🟢 완화적 유동성"
-        elif macro_score >= 50: macro_status = "🟡 중립/과도기"
-        else: macro_status = "🔴 긴축 환경"
+        # 전체 시계열 기반 상태 확률 계산 (수정: 전체 X 입력 후 마지막 행 취득)
+        all_probs = model.predict_proba(X)
+        last_prob = all_probs[-1]
 
-        return {'macro_score': macro_score, 'macro_status': macro_status}
-    except Exception:
-        return macro_data
+        # 변동성 대비 수익률이 가장 낮은 State(투매/공포 국면) 인덱스 찾기
+        means = model.means_
+        # means[:, 0] = 평균 수익률, means[:, 1] = 평균 변동성
+        # 공포 국면: 수익률은 작고 변동성은 큰 상태
+        panic_score = means[:, 0] - means[:, 1] 
+        fear_state_idx = np.argmin(panic_score)
 
-# ==========================================
-# 3. 보조 지표 및 정밀 추세 전환 연산
-# ==========================================
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return (100 - (100 / (1 + rs))).fillna(50)
+        fear_prob = round(last_prob[fear_state_idx] * 100, 1)
 
-def calculate_cmf(df, period=20):
-    high_low_diff = (df['High'] - df['Low']).replace(0, np.nan)
-    mfv = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / high_low_diff
-    mfv = mfv.fillna(0) * df['Volume']
-    vol_sum = df['Volume'].rolling(period).sum().replace(0, np.nan)
-    return (mfv.rolling(period).sum() / vol_sum).fillna(0)
-
-def precision_reversal_analysis(df):
-    sub = df.iloc[-90:].copy()
-    cur_price = sub['Close'].iloc[-1]
-
-    # 1. 차트 구조 파괴 (CHoCH)
-    sub['High_Pivot'] = (sub['High'].shift(1) > sub['High'].shift(2)) & (sub['High'].shift(1) > sub['High'])
-    recent_pivots = sub[sub['High_Pivot']]['High'].iloc[-3:]
-    last_swing_high = recent_pivots.max() if not recent_pivots.empty else sub['High'].iloc[-20:-5].max()
-    choch_break = cur_price > last_swing_high
-
-    # 2. 수급 폭발 (CMF & Volume)
-    sub['CMF'] = calculate_cmf(sub, 20)
-    cmf_inflow = sub['CMF'].iloc[-1] > 0.03
-    
-    sub['Is_Bull'] = sub['Close'] > sub['Open']
-    bear_vol = sub[~sub['Is_Bull']]['Volume'].iloc[-20:]
-    bear_vol_avg = bear_vol.mean() if not bear_vol.empty else 1.0
-    recent_bull_vol = sub[sub['Is_Bull']]['Volume'].iloc[-3:].max() if not sub[sub['Is_Bull']]['Volume'].iloc[-3:].empty else 0
-    vol_surge = (recent_bull_vol >= bear_vol_avg * 1.7) if bear_vol_avg > 0 else False
-    vol_ratio = round(recent_bull_vol / bear_vol_avg, 2) if bear_vol_avg > 0 else 1.0
-
-    # 3. 다중 다이버전스
-    sub['RSI'] = calculate_rsi(sub['Close'], 14)
-    ema12 = sub['Close'].ewm(span=12).mean()
-    ema26 = sub['Close'].ewm(span=26).mean()
-    sub['MACD_Hist'] = (ema12 - ema26) - (ema12 - ema26).ewm(span=9).mean()
-
-    low_idx = [i for i in range(2, len(sub)-2) if sub['Low'].iloc[i] < sub['Low'].iloc[i-1] and sub['Low'].iloc[i] < sub['Low'].iloc[i-2]]
-    rsi_div, macd_div = False, False
-    if len(low_idx) >= 2:
-        i1, i2 = low_idx[-2], low_idx[-1]
-        if sub['Low'].iloc[i2] <= sub['Low'].iloc[i1]:
-            if sub['RSI'].iloc[i2] > sub['RSI'].iloc[i1] + 2: rsi_div = True
-            if sub['MACD_Hist'].iloc[i2] > sub['MACD_Hist'].iloc[i1]: macd_div = True
-
-    # 4. 이평선 우상향 턴어라운드 (상승추세 시작 판단)
-    ma5 = sub['Close'].rolling(5).mean()
-    ma20 = sub['Close'].rolling(20).mean()
-    ma20_slope = (ma20.iloc[-1] - ma20.iloc[-4]) / ma20.iloc[-4] * 100 if ma20.iloc[-4] != 0 else 0
-    ma_rebound = (cur_price > ma5.iloc[-1]) and (ma5.iloc[-1] > ma20.iloc[-1]) and (ma20_slope > 0.0)
-
-    return {
-        'choch_break': choch_break,
-        'cmf_inflow': cmf_inflow,
-        'vol_surge': vol_surge,
-        'vol_ratio': vol_ratio,
-        'rsi_div': rsi_div,
-        'macd_div': macd_div,
-        'ma_rebound': ma_rebound,
-        'ma20_slope': round(ma20_slope, 2)
-    }
+        # 공포/바닥 국면 확률이 40% 이상일 때 통과
+        is_fear_zone = fear_prob >= 40.0
+        return is_fear_zone, fear_prob, f"공포/바닥 확률: {fear_prob}%"
+    except Exception as e:
+        return False, 0.0, "HMM 연산 우회"
 
 # ==========================================
-# 4. 자산 사이클 판단 및 매수 제어
+# 3. [축 1 & 3] 주봉 기반 3축 앙상블 분석 엔진
 # ==========================================
-def analyze_asset_cycle(symbol, asset_info, macro_score):
+def analyze_ensemble_system(symbol, asset_info):
     try:
-        df = yf.Ticker(symbol).history(period="6y", interval="1d", timeout=12)
-        if df.empty or len(df) < 1000: return None
+        ticker = yf.Ticker(symbol)
+        df_daily = ticker.history(period="6y", interval="1d", timeout=12)
+        if df_daily.empty or len(df_daily) < 1000: return None
     except Exception: return None
 
-    cur_price = float(df['Close'].iloc[-1])
+    cur_price = float(df_daily['Close'].iloc[-1])
 
-    # 1. 전고점(ATH) 및 고점 대비 하락률(MDD) 계산
-    ath_price = float(df['Close'].max())
+    # 주봉 데이터 변환
+    weekly = pd.DataFrame()
+    weekly['Close'] = df_daily['Close'].resample('W-FRI').last()
+    weekly['High'] = df_daily['High'].resample('W-FRI').max()
+    weekly['Low'] = df_daily['Low'].resample('W-FRI').min()
+    weekly['Volume'] = df_daily['Volume'].resample('W-FRI').sum()
+    weekly = weekly.dropna()
+
+    ath_price = float(weekly['Close'].max())
     mdd_pct = round(((cur_price - ath_price) / ath_price) * 100, 2)
 
-    # 2. 실제 주봉 200MA 계산
-    df_weekly = df['Close'].resample('W-FRI').last().dropna()
-    if len(df_weekly) < 200: return None
-    w_ma200 = float(df_weekly.rolling(200).mean().iloc[-1])
+    # 200주 이동평균선
+    weekly['MA200'] = weekly['Close'].rolling(200).mean()
+    w_ma200 = float(weekly['MA200'].iloc[-1])
     dist_w200_pct = round(((cur_price - w_ma200) / w_ma200) * 100, 2)
 
-    # 3. 추세 전환 정밀 분석
-    rev = precision_reversal_analysis(df)
-    tech_score = 0
-    if rev['choch_break']: tech_score += 30
-    if rev['vol_surge']: tech_score += 25
-    if rev['cmf_inflow']: tech_score += 15
-    if rev['rsi_div'] or rev['macd_div']: tech_score += 20
-    if rev['ma_rebound']: tech_score += 10
-    final_score = int(tech_score * 0.8 + macro_score * 0.2)
+    # -----------------------------------------------------------
+    # [축 1] 가격 위치 필터: 200주선 터치/이탈 (+5% 이하)
+    # -----------------------------------------------------------
+    axis1_price_passed = dist_w200_pct <= 5.0
 
     # -----------------------------------------------------------
-    # [사이클 핵심 로직] 사용자 정의 기준 적용
+    # [축 2] HMM 통계 국면 필터
     # -----------------------------------------------------------
-    is_at_bottom_zone = dist_w200_pct <= 5.0 # 200주선 터치/하방 이탈 (+5% 이하)
-    is_uptrend_started = rev['ma_rebound'] and rev['choch_break'] # 상승 추세 재개 여부
+    axis2_hmm_passed, fear_prob, hmm_msg = analyze_hmm_regime(df_daily)
 
-    if not is_at_bottom_zone:
-        # 200주선 바닥에 오지 않은 구간
-        cycle_state = "1단계: 전고점 후 하락 대기중 (관망)"
-        action = "⚪ [매수 금지] 200주선 바닥 미도달 ➔ 관망 / 다음 하락장 대기"
+    # -----------------------------------------------------------
+    # [축 3] 수급/구조 필터 (주봉 수급 유입)
+    # -----------------------------------------------------------
+    mfv = ((weekly['Close'] - weekly['Low']) - (weekly['High'] - weekly['Close'])) / (weekly['High'] - weekly['Low']).replace(0, np.nan)
+    cmf_w = (mfv.fillna(0) * weekly['Volume']).rolling(10).sum() / weekly['Volume'].rolling(10).sum().replace(0, np.nan)
+    cmf_passed = cmf_w.iloc[-1] > 0.0
+
+    vol_avg_10w = weekly['Volume'].iloc[-11:-1].mean()
+    vol_passed = weekly['Volume'].iloc[-1] >= vol_avg_10w * 1.3
+    
+    recent_swing_high = weekly['High'].iloc[-8:-2].max()
+    choch_passed = cur_price > recent_swing_high
+
+    axis3_flow_passed = (cmf_passed or vol_passed) and choch_passed
+
+    # -----------------------------------------------------------
+    # [상승 추세 전환 판단 (수정)]
+    # 200주선 근처(+15% 이내)에서 5주선 > 20주선 골든크로스 발생 시
+    # -----------------------------------------------------------
+    w_ma5 = weekly['Close'].rolling(5).mean()
+    w_ma20 = weekly['Close'].rolling(20).mean()
+    is_near_bottom_rebound = dist_w200_pct <= 15.0 # 바닥권 탈출 과정인지 체크
+    uptrend_rebound_started = is_near_bottom_rebound and (w_ma5.iloc[-1] > w_ma20.iloc[-1]) and choch_passed
+
+    # -----------------------------------------------------------
+    # 사이클 및 자금 집행 의사결정
+    # -----------------------------------------------------------
+    if uptrend_rebound_started:
+        cycle_state = "3단계: 바닥 탈출 및 상승 추세 시작 (매수 중단)"
+        action = "🛑 [매수 종료 / 홀딩] 바닥에서 반격 성공 ➔ 추가 매수 중단 후 수익 극대화"
+    elif axis1_price_passed and axis2_hmm_passed and axis3_flow_passed:
+        cycle_state = "2단계: 3축 ALL-PASS 진성 바닥 (매수 집행 구간)"
+        action = f"⚡ [비상금 분할 매수 집행] 모든 노이즈 제거 승인 ({hmm_msg}) ➔ 1차 진입"
+    elif axis1_price_passed:
+        cycle_state = "2단계 대기: 200주선 접근 중 (수급/모델 미충족)"
+        action = f"⏳ [관망] 200주선 바닥권 진입했으나 반격 수급 부재 (HMM: {'OK' if axis2_hmm_passed else 'NO'}, 수급: {'OK' if axis3_flow_passed else 'NO'})"
     else:
-        # 200주선 바닥권 도착
-        if is_uptrend_started:
-            cycle_state = "3단계: 200주선 탈출 및 상승 추세 시작 (매수 중단)"
-            action = "🛑 [매수 종료 / 홀딩] 바닥 탈출 및 상승 추세 진입 ➔ 추가 매수 중단 후 관망"
-        else:
-            cycle_state = "2단계: 200주선 바닥 진입 (매수 집행 구간)"
-            if final_score >= 70:
-                action = f"⚡ [분할 매수 집행] 바닥권 점수 높음 ({final_score}점) ➔ 비상 준비금 적극 분할 매수"
-            elif final_score >= 40:
-                action = f"👀 [DCA/정찰 매수] 바닥권이나 반격 약함 ({final_score}점) ➔ DCA 방식을 통한 소액 분할 매수"
-            else:
-                action = f"⏳ [대기] 200주선 타격했으나 추가 하락 위험 ({final_score}점) ➔ 관망 후 반격 신호 대기"
+        cycle_state = "1단계: 평시 구간 (신고점 후 하락장 대기)"
+        action = "⚪ [관망] 200주선 바닥 미도달 ➔ 비상 준비금 집행 금지"
 
     return {
         'name': asset_info['name'],
@@ -180,39 +139,42 @@ def analyze_asset_cycle(symbol, asset_info, macro_score):
         'mdd_pct': mdd_pct,
         'w_ma200': w_ma200,
         'dist_w200_pct': dist_w200_pct,
-        'is_at_bottom_zone': is_at_bottom_zone,
+        'axis1': axis1_price_passed,
+        'axis2': axis2_hmm_passed,
+        'axis3': axis3_flow_passed,
+        'hmm_msg': hmm_msg,
         'cycle_state': cycle_state,
-        'final_score': final_score,
-        'rev': rev,
         'action': action
     }
 
 # ==========================================
-# 5. 실행 및 리포팅
+# 4. 실행 및 알림
 # ==========================================
 def main():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    macro = get_fred_macro_data()
 
-    report = f"""🤖 [QQQ & BTC 200주선 사이클 매수 리포트]
-📅 기준시각: {now_str}
-🌐 거시 유동성: {macro['macro_status']} ({macro['macro_score']}/100)
+    report = f"""🤖 [3축 앙상블 노이즈 제어 매수 리포트]
+📅 검증 시각: {now_str}
 ================================="""
 
     for symbol, info in TARGET_ASSETS.items():
-        res = analyze_asset_cycle(symbol, info, macro['macro_score'])
+        res = analyze_ensemble_system(symbol, info)
         if res:
             report += f"""
 
 📌 [{res['name']}]
-• 현재가: ${res['cur_price']:,.2f}
-• 전고점: ${res['ath_price']:,.2f} (고점 대비: {res['mdd_pct']}%)
-• 200주선: ${res['w_ma200']:,.2f} (격차: {res['dist_w200_pct']}%)
+• 현재가: ${res['cur_price']:,.2f} | 200주선: ${res['w_ma200']:,.2f}
+• 전고점 대비: {res['mdd_pct']}% | 200주선 격차: {res['dist_w200_pct']}%
 
-🔄 현재 사이클 상태: 
+📊 3축 독립 검증 현황:
+  [축 1] 가격 위치 (200주선 ≤ +5%): {"✅ PASS" if res['axis1'] else "❌ FAIL"}
+  [축 2] 통계 모델 ({res['hmm_msg']}): {"✅ PASS" if res['axis2'] else "❌ FAIL"}
+  [축 3] 주봉 수급/구조 (스마트머니): {"✅ PASS" if res['axis3'] else "❌ FAIL"}
+
+🔄 사이클 상태: 
    {res['cycle_state']}
 
-👉 최종 행동 지침: 
+👉 최종 자금 집행 명령: 
    {res['action']}
 ---------------------------------"""
 
