@@ -3,7 +3,7 @@ name: 200W-MA XGBoost Rebound Prediction System
 on:
   schedule:
     # 매일 한국 시간 기준 아침 8시 실행 (UTC 23:00)
-    - cron: '0 23 * * *'
+    - cron: '0 22 * * *'
   workflow_dispatch: # 수동 실행 버튼 활성화
 
 jobs:
