@@ -12,12 +12,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 TARGET_ASSETS = {
-    "QLD": {"name": "QLD (나스닥 2배 레버리지)", "period": "15y"},
+    "QQQ": {"name": "QQQ (나스닥 100 본주)", "period": "15y"},
     "BTC-USD": {"name": "비트코인 (BTC)", "period": "10y"}
 }
 
 # ==========================================
-# 2. 로그 선형회귀 채널 & 3단계 분할 매수 연산
+# 2. 로그 선형회귀 채널 & 3단계 분할 매수 연산 Engine
 # ==========================================
 def analyze_log_channel_system(symbol, asset_name, period):
     try:
@@ -32,7 +32,7 @@ def analyze_log_channel_system(symbol, asset_name, period):
     df['Log_Close'] = np.log(df['Close'])
     df['Time_Index'] = np.arange(len(df))
 
-    # 선형 회귀 연산 (1차 기울기 및 절편)
+    # 선형 회귀 연산 (기울기 및 절편)
     x = df['Time_Index'].values
     y = df['Log_Close'].values
     slope, intercept = np.polyfit(x, y, 1)
@@ -64,26 +64,26 @@ def analyze_log_channel_system(symbol, asset_name, period):
     channel_pos = round(((cur_log - min_log) / (max_log - min_log)) * 100, 1)
 
     # -----------------------------------------------------------
-    # 3단계 분할 매수 및 익절 가이드 세부 정밀 판정
+    # 3단계 분할 매수 및 익절 가이드 세부 판정
     # -----------------------------------------------------------
     if channel_pos <= 0.0:
         cycle_state = "🚨 [3차 필살기 구간] 채널 최하단선 이탈 (-2σ 이하)"
-        action = "⚡ [3차 매수 집행] 역대급 바닥! 남은 비상금 30% 전액 집행 (누적 100% 매수)"
+        action = "⚡ [3차 매수 집행] 역대급 바닥! QQQ/BTC 전용 비상금 남은 30% 전액 집행 (누적 100%)"
     elif channel_pos <= 5.0:
         cycle_state = "🚨 [2차 본동대 구간] 채널 Pos 5% 이하 (진성 바닥)"
-        action = "⚡ [2차 매수 집행] 진성 바닥 밀착! 비상금 40% 추가 집행 (누적 70% 매수)"
+        action = "⚡ [2차 매수 집행] 진성 바닥 밀착! QQQ/BTC 전용 비상금 40% 추가 집행 (누적 70%)"
     elif channel_pos <= 15.0:
         cycle_state = "🚨 [1차 정찰대 구간] 채널 Pos 15% 이하 진입"
-        action = "⚡ [1차 매수 집행] 하단선 근처 접근! 모아둔 비상금의 30% 1차 집행"
+        action = "⚡ [1차 매수 집행] 하단선 근처 접근! 모아둔 QQQ/BTC 전용 비상금의 30% 1차 집행"
     elif channel_pos >= 85.0:
         cycle_state = "🔥 [극단적 과열 구간] 로그 채널 상단선 도달 (+2σ)"
         action = "🛑 [전량 분할 익절] 역사적 고점 도달! 보유 물량 30%/30%/40% 나누어 현금화"
     elif cur_price > cur_center:
         cycle_state = "🟢 [상방 추세 진행중] 채널 중앙선 상회"
-        action = "⚪ [관망 / 홀딩] 중앙선 위 우상향 중. 매수 금지 및 현금 축적"
+        action = "⚪ [관망 / 현금 적립] 중앙선 위 우상향 중. 매수 금지 및 월 100만 원 현금 축적"
     else:
         cycle_state = "🟡 [조정 진행중] 채널 중앙선 하회"
-        action = "⏳ [관망] 조정 진행 중. 하단선(Pos 15% 이하) 진입 시 매수 시작"
+        action = "⏳ [관망 / 현금 적립] 조정 진행 중. 하단선(Pos 15% 이하) 진입 전까지 현금 축적"
 
     return {
         'name': asset_name,
@@ -104,7 +104,7 @@ def analyze_log_channel_system(symbol, asset_name, period):
 def main():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    report = f"""📐 [로그 채널 3단계 분할매수 시스템 리포트]
+    report = f"""📐 [QQQ & BTC 로그 채널 분할매수 리포트]
 📅 검증 시각: {now_str}
 ================================="""
 
