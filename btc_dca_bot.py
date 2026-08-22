@@ -22,13 +22,24 @@ TARGET_ASSETS = {
 def analyze_log_channel_system(symbol, asset_name, period):
     try:
         ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period, interval="1d", timeout=12)
-        if df.empty or len(df) < 500: return None
+        df = ticker.history(period=period, interval="1d", timeout=15)
+        
+        # 데이터 유효성 검증
+        if df is None or df.empty:
+            print(f"[{symbol}] 데이터를 가져오지 못했습니다.")
+            return None
+            
+        # 종가(Close) 기준 결측치 완전 제거
+        df = df[['Close']].dropna()
+        if len(df) < 500:
+            print(f"[{symbol}] 분석에 필요한 최소 데이터 개수 부족 (현재: {len(df)}개)")
+            return None
+
     except Exception as e:
-        print(f"[{symbol}] 데이터 수집 실패: {e}")
+        print(f"[{symbol}] 데이터 수집 중 예외 발생: {e}")
         return None
 
-    df = df.dropna()
+    # 로그 변환 및 타임 인덱스 생성
     df['Log_Close'] = np.log(df['Close'])
     df['Time_Index'] = np.arange(len(df))
 
@@ -134,14 +145,19 @@ def main():
     # 텔레그램 알림 전송
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         try:
-            requests.post(
+            resp = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                 json={"chat_id": TELEGRAM_CHAT_ID, "text": report},
                 timeout=10
             )
-            print("텔레그램 발송 성공!")
+            if resp.status_code == 200:
+                print("텔레그램 발송 성공!")
+            else:
+                print(f"텔레그램 발송 응답 에러: {resp.status_code} - {resp.text}")
         except Exception as e:
-            print(f"텔레그램 발송 실패: {e}")
+            print(f"텔레그램 발송 예외 발생: {e}")
+    else:
+        print("텔레그램 토큰 또는 Chat ID 설정이 비어있습니다. 콘솔 출력으로 대체합니다.")
 
 if __name__ == "__main__":
     main()
