@@ -38,8 +38,8 @@ def analyze_log_channel_system(symbol, asset_name, period):
         print(f"[{symbol}] yfinance API 연결 에러: {e}")
         return None
 
-    # 날짜 기준 정확한 시계열 x축 생성 (365일/252일 거래일 차이 완벽 보정)
-    df.index = pd.to_datetime(df.index)
+    # [핵심 방어막] 타임존(Timezone) 제거하여 날짜 뺄셈 충돌 에러 원천 차단
+    df.index = pd.to_datetime(df.index).tz_localize(None)
     first_date = df.index[0]
     df['Time_Days'] = (df.index - first_date).days.astype(float)
     df['Log_Close'] = np.log(df['Close'])
@@ -94,7 +94,7 @@ def analyze_log_channel_system(symbol, asset_name, period):
         action = "🛑 [전량 분할 익절] 역사적 고점 도달! 보유 물량 30%/30%/40% 나누어 현금화"
     elif cur_price > cur_center:
         cycle_state = "🟢 [상방 추세 진행중] 채널 중앙선 상회"
-        action = "⚪ [관망 / 현금 적립] 중앙선 위 우상향 중. 매수 금지 및 월 100만 원 현금 축적"
+        action = "⚪ [관망 / 현금 적립] 중앙선 위 우상향 중. 매수 금지 및 월 적립금 현금 축적"
     else:
         cycle_state = "🟡 [조정 진행중] 채널 중앙선 하회"
         action = "⏳ [관망 / 현금 적립] 조정 진행 중. 하단선(Pos 15% 이하) 진입 전까지 현금 축적"
