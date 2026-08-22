@@ -12,14 +12,14 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 TARGET_ASSETS = {
-    "QQQ": {"name": "QQQ (나스닥100)", "period": "15y"},
+    "QLD": {"name": "QLD (나스닥 2배 레버리지)", "period": "15y"},
     "BTC-USD": {"name": "비트코인 (BTC)", "period": "10y"}
 }
 
 # ==========================================
-# 2. 로그 선형회귀 채널 연산 엔진
+# 2. 로그 선형회귀 채널 & 3단계 분할 매수 연산
 # ==========================================
-def analyze_log_regression_channel(symbol, asset_name, period):
+def analyze_log_channel_system(symbol, asset_name, period):
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, interval="1d", timeout=12)
@@ -37,7 +37,7 @@ def analyze_log_regression_channel(symbol, asset_name, period):
     y = df['Log_Close'].values
     slope, intercept = np.polyfit(x, y, 1)
 
-    # 잔차(Residuals) 기반 표준편차 계산
+    # 잔차(Residuals) 기반 표준편차 연산
     log_fitted = slope * x + intercept
     residuals = y - log_fitted
     std_dev = np.std(residuals)
@@ -47,18 +47,16 @@ def analyze_log_regression_channel(symbol, asset_name, period):
     center_band = np.exp(log_fitted)                   # 0σ  (적정 중앙)
     lower_band = np.exp(log_fitted - (2.0 * std_dev))  # -2σ (바닥 하단)
 
-    # 현재가 기준 값 추출
     cur_price = float(df['Close'].iloc[-1])
     cur_upper = float(upper_band[-1])
     cur_center = float(center_band[-1])
     cur_lower = float(lower_band[-1])
 
-    # 최고가 대비 하락률 (MDD)
+    # 전고점 대비 하락률 (MDD)
     ath_price = float(df['Close'].max())
     mdd_pct = round(((cur_price - ath_price) / ath_price) * 100, 2)
 
     # 채널 내 상대적 위치 (0% = 하단선, 50% = 중앙선, 100% = 상단선)
-    # 로그 스케일 기준 상대 위치 계산
     min_log = log_fitted[-1] - (2.0 * std_dev)
     max_log = log_fitted[-1] + (2.0 * std_dev)
     cur_log = np.log(cur_price)
@@ -66,20 +64,26 @@ def analyze_log_regression_channel(symbol, asset_name, period):
     channel_pos = round(((cur_log - min_log) / (max_log - min_log)) * 100, 1)
 
     # -----------------------------------------------------------
-    # 로그 채널 기반 자금 집행 사이클 판정
+    # 3단계 분할 매수 및 익절 가이드 세부 정밀 판정
     # -----------------------------------------------------------
-    if channel_pos <= 15.0:
-        cycle_state = "🚨 [2단계: 역대급 대세 바닥] 로그 채널 하단 접근"
-        action = "⚡ [비상금 분할 매수 집행] 장기 로그 채널 최하단선 터치! 강력 매수 집행"
+    if channel_pos <= 0.0:
+        cycle_state = "🚨 [3차 필살기 구간] 채널 최하단선 이탈 (-2σ 이하)"
+        action = "⚡ [3차 매수 집행] 역대급 바닥! 남은 비상금 30% 전액 집행 (누적 100% 매수)"
+    elif channel_pos <= 5.0:
+        cycle_state = "🚨 [2차 본동대 구간] 채널 Pos 5% 이하 (진성 바닥)"
+        action = "⚡ [2차 매수 집행] 진성 바닥 밀착! 비상금 40% 추가 집행 (누적 70% 매수)"
+    elif channel_pos <= 15.0:
+        cycle_state = "🚨 [1차 정찰대 구간] 채널 Pos 15% 이하 진입"
+        action = "⚡ [1차 매수 집행] 하단선 근처 접근! 모아둔 비상금의 30% 1차 집행"
     elif channel_pos >= 85.0:
-        cycle_state = "🔥 [극단적 과열] 로그 채널 상단 도달"
-        action = "🛑 [분할 익절 / 매수 완전 금지] 장기 추세 최고점 도달. 리스크 관리"
+        cycle_state = "🔥 [극단적 과열 구간] 로그 채널 상단선 도달 (+2σ)"
+        action = "🛑 [전량 분할 익절] 역사적 고점 도달! 보유 물량 30%/30%/40% 나누어 현금화"
     elif cur_price > cur_center:
-        cycle_state = "🟢 [1단계: 상방 추세 진행중] 채널 중앙선 상회"
-        action = "⚪ [관망 / 홀딩] 중앙선 위 우상향 진행 중. 매수 대기"
+        cycle_state = "🟢 [상방 추세 진행중] 채널 중앙선 상회"
+        action = "⚪ [관망 / 홀딩] 중앙선 위 우상향 중. 매수 금지 및 현금 축적"
     else:
-        cycle_state = "🟡 [1단계: 조정 진행중] 채널 중앙선 하회"
-        action = "⏳ [관망] 중앙선 아래로 조정 진행 중. 하단선(15% 이하) 진입 시 매수"
+        cycle_state = "🟡 [조정 진행중] 채널 중앙선 하회"
+        action = "⏳ [관망] 조정 진행 중. 하단선(Pos 15% 이하) 진입 시 매수 시작"
 
     return {
         'name': asset_name,
@@ -100,12 +104,12 @@ def analyze_log_regression_channel(symbol, asset_name, period):
 def main():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    report = f"""📐 [장기 로그 회귀 채널 시스템 리포트]
+    report = f"""📐 [로그 채널 3단계 분할매수 시스템 리포트]
 📅 검증 시각: {now_str}
 ================================="""
 
     for symbol, info in TARGET_ASSETS.items():
-        res = analyze_log_regression_channel(symbol, info['name'], info['period'])
+        res = analyze_log_channel_system(symbol, info['name'], info['period'])
         if res:
             report += f"""
 
@@ -121,7 +125,7 @@ def main():
 🔄 사이클 상태:
    {res['cycle_state']}
 
-👉 자금 집행 명령:
+👉 자금 집행 가이드:
    {res['action']}
 ---------------------------------"""
 
