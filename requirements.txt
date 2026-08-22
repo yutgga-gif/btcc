@@ -4,3 +4,4 @@ numpy
 requests
 xgboost
 scikit-learn
+hmmlearn
